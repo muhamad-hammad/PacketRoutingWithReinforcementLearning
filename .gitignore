@@ -1,0 +1,34 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# VSCode settings
+.vscode/
+
+# Logs
+*.log
+
+# Local development settings
+.env
+
+# Model checkpoints (if you don't want to track them)
+# Uncomment if you don't want to track model files
+# models_demo/
+
+# Operating System
+.DS_Store
+Thumbs.db
