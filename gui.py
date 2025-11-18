@@ -168,6 +168,11 @@ class App(tk.Tk):
         self.G = build_sample_graph()
         # layout positions for plotting
         self.pos = nx.spring_layout(self.G, seed=42)
+        
+        # Training control state
+        self.training_thread = None
+        self.training_stop = threading.Event()
+        self.training_pause = threading.Event()
 
         # Periodic log updater
         self.after(200, self._drain_log_queue)
@@ -328,7 +333,8 @@ class App(tk.Tk):
 
         def _train_task():
             try:
-                G = build_sample_graph()
+                # Use the current GUI graph
+                G = self.G
                 env = NetworkRoutingEnv(G, reward_mode='C', seed=seed)
                 state_dim = env._get_state().shape[0]
                 action_dim = env.num_nodes
@@ -380,8 +386,6 @@ class App(tk.Tk):
                     log(f'Training completed. Model saved to {model_path}')
 
                 self.agent = agent
-                self.G = G
-                self.pos = nx.spring_layout(self.G, seed=42)
 
             except Exception as e:
                 log(f"Training error: {e}")
@@ -463,7 +467,11 @@ class App(tk.Tk):
 
         def _run():
             try:
-                G = build_sample_graph()
+                # Use the current GUI graph instead of creating a new one
+                G = self.G
+                # Update position layout for consistency
+                self.pos = nx.spring_layout(G, seed=42)
+                
                 env = NetworkRoutingEnv(G, reward_mode='C', seed=seed)
                 state_dim = env._get_state().shape[0]
                 action_dim = env.num_nodes
@@ -556,11 +564,9 @@ class App(tk.Tk):
                 self.ax.axis('off')
                 self.canvas.draw()
 
-                self.log_text.insert(tk.END, f"LIVE Ep {episode}: current={current} dst={dst} reward={total_reward:.2f} eps={eps:.3f}\n")
-                self.log_text.see(tk.END)
-            except Exception:
-                self.log_text.insert(tk.END, "Error updating LIVE UI\n")
-                self.log_text.see(tk.END)
+            except Exception as e:
+                log(f"Error updating LIVE UI: {e}")
+                log(traceback.format_exc())
 
         self.after(1, _ui_update)
 
@@ -581,12 +587,17 @@ class App(tk.Tk):
         
         def _compare_task():
             try:
+                # Save original epsilon and set to 0 for deterministic behavior
+                original_epsilon = self.agent.epsilon
+                self.agent.epsilon = 0.0
+                
                 # Get Dijkstra's path
                 try:
                     dijkstra_path = nx.shortest_path(self.G, src, dst, weight='weight')
                     dijkstra_length = nx.shortest_path_length(self.G, src, dst, weight='weight')
                 except nx.NetworkXNoPath:
                     log("No path exists between source and destination!")
+                    self.agent.epsilon = original_epsilon
                     return
                 
                 # Get RL agent's path
@@ -653,13 +664,24 @@ class App(tk.Tk):
                 elif rl_length > dijkstra_length:
                     log(f"RL Agent path is {(rl_length/dijkstra_length - 1)*100:.1f}% longer than optimal")
                 
+                # Restore original epsilon
+                self.agent.epsilon = original_epsilon
+                
             except Exception as e:
                 log(f"Comparison error: {e}")
                 log(traceback.format_exc())
+                # Restore epsilon even on error
+                if self.agent:
+                    self.agent.epsilon = original_epsilon
                 
         self._run_in_thread(_compare_task)
 
     def _run_simulation(self, src, dst, delay=1.0):
+        # Save original epsilon and set to 0 for deterministic behavior
+        original_epsilon = self.agent.epsilon if self.agent else 0.0
+        if self.agent:
+            self.agent.epsilon = 0.0
+        
         env = NetworkRoutingEnv(self.G, reward_mode='C')
         env.reset(src=src, dst=dst)
 
@@ -731,6 +753,10 @@ class App(tk.Tk):
             if done:
                 log(f"Reached destination {dst} in {step} steps")
                 break
+        
+        # Restore original epsilon
+        if self.agent:
+            self.agent.epsilon = original_epsilon
 
 
 if __name__ == '__main__':

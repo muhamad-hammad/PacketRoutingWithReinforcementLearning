@@ -6,6 +6,10 @@ from src.env import NetworkRoutingEnv
 
 
 def extract_route_from_agent(agent, G, src, dst, max_steps=None):
+    # Save original epsilon and set to 0 for deterministic evaluation
+    original_epsilon = agent.epsilon
+    agent.epsilon = 0.0
+    
     env = NetworkRoutingEnv(G, reward_mode='C')
     env.reset(src=src, dst=dst)
     path = [src]
@@ -24,7 +28,9 @@ def extract_route_from_agent(agent, G, src, dst, max_steps=None):
             total_cost += -reward
         if done:
             break
-
+    
+    # Restore original epsilon
+    agent.epsilon = original_epsilon
     return path, total_cost
 
 
