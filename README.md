@@ -38,7 +38,7 @@ An interactive GUI application demonstrating Deep Q-Learning (DQN) for packet ro
 - `src/env.py` - Network routing environment implementation
 - `src/agent.py` - DQN agent with experience replay
 - `train_dqn_tf.py` - Training script for the DQN model
-- `gui.py` - Interactive visualization and control interface
+- `streamlit_app.py` - Interactive Streamlit web application
 - `evaluate.py` - Evaluation and comparison tools
 - `tests/test_env.py` - Environment unit tests
 - `requirements.txt` - Project dependencies
@@ -53,8 +53,8 @@ python -m venv .venv
 # Install dependencies
 pip install -r requirements.txt
 
-# Launch the GUI
-python gui.py
+# Launch the Streamlit App
+streamlit run streamlit_app.py
 ```
 
 ## Using the GUI
@@ -80,7 +80,7 @@ python gui.py
 - Uses TensorFlow (CPU) for the DQN implementation
 - NetworkX for graph operations and visualization
 - Matplotlib for embedded plotting
-- Tkinter for the GUI framework
+- Streamlit for the web interface
 
 ## Performance
 The RL agent typically achieves near-optimal performance after sufficient training:

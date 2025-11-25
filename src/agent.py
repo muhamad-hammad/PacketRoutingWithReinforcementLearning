@@ -67,7 +67,7 @@ class DQNAgent:
         # valid_actions: list of neighbor node indices
         if np.random.rand() < self.epsilon:
             return random.choice(valid_actions)
-        q = self.model.predict(state.reshape(1, -1), verbose=0)[0]
+        q = self.model(state.reshape(1, -1), training=False).numpy()[0]
         # pick valid action with max q
         return max(valid_actions, key=lambda a: q[a])
 
@@ -79,8 +79,8 @@ class DQNAgent:
             return 0
 
         states, actions, rewards, next_states, dones = self.replay.sample(self.batch_size)
-        targets = self.model.predict(states, verbose=0)
-        next_qs = self.target.predict(next_states, verbose=0)
+        targets = self.model(states, training=False).numpy()
+        next_qs = self.target(next_states, training=False).numpy()
 
         # For more accurate targets, mask the next-state Q-values to only valid neighbor actions
         # (requires agent to have access to the graph). The state layout is expected to
@@ -106,7 +106,7 @@ class DQNAgent:
 
                 targets[i][a] = rewards[i] + self.gamma * next_max
 
-        self.model.fit(states, targets, epochs=1, verbose=0)
+        self.model.train_on_batch(states, targets)
 
         # epsilon decay
         if self.epsilon > self.epsilon_min:
