@@ -6,10 +6,18 @@ import os
 import random
 import numpy as np
 import networkx as nx
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import tensorflow as tf
+tf.config.run_functions_eagerly(True)
 
 from src.env import NetworkRoutingEnv
 from src.agent import DQNAgent
+try:
+    from src.debug_utils import debug_log
+except ImportError:
+    from debug_utils import debug_log
 
 
 def build_sample_graph():
@@ -44,12 +52,18 @@ def train(episodes=500, save_dir='models', seed=0):
 
         while not done:
             valid_actions = list(G.neighbors(env.current))
+            # debug_log("Acting")
             action = agent.act(state, valid_actions)
+            # debug_log("Stepping")
             next_state, reward, done, info = env.step(action)
             agent.remember(state, action, reward, next_state, done)
+            
+            debug_log(f"Step: ep={ep}, steps={env.steps}")
             agent.replay_train()
+            debug_log("Replay done")
             state = next_state
             total_reward += reward
+        debug_log(f"Episode {ep} done")
 
         rewards.append(total_reward)
 
@@ -58,21 +72,35 @@ def train(episodes=500, save_dir='models', seed=0):
             print(f'Ep {ep+1}/{episodes}  TotalReward={total_reward:.2f}  Avg50={avg_recent:.2f}  Eps={agent.epsilon:.3f}')
 
     model_path = os.path.join(save_dir, 'dqn_routing_tf.keras')
-    agent.save(model_path)
+    debug_log(f"Saving model to {model_path}")
+    try:
+        agent.save(model_path)
+        debug_log("Model saved successfully")
+    except Exception as e:
+        debug_log(f"Error saving model: {e}")
+        # Try saving weights only as fallback
+        weights_path = os.path.join(save_dir, 'dqn_routing_weights.h5')
+        debug_log(f"Trying to save weights to {weights_path}")
+        agent.model.save_weights(weights_path)
 
     # Plot learning curve
-    plt.figure()
-    plt.plot(rewards)
-    plt.xlabel('Episode')
-    plt.ylabel('Total reward')
-    plt.title('Learning curve')
-    plt.grid(True)
-    plt.savefig(os.path.join(save_dir, 'learning_curve.png'))
-    plt.close()
+    debug_log("Plotting learning curve")
+    try:
+        plt.figure()
+        plt.plot(rewards)
+        plt.xlabel('Episode')
+        plt.ylabel('Total reward')
+        plt.title('Learning curve')
+        plt.grid(True)
+        plt.savefig(os.path.join(save_dir, 'learning_curve.png'))
+        plt.close()
+        debug_log("Plotting finished")
+    except Exception as e:
+        debug_log(f"Error plotting: {e}")
 
     return agent, G
 
 
 if __name__ == '__main__':
-    agent, G = train(episodes=300, save_dir='models_demo', seed=0)
-    print('Training finished. Model saved to models_demo/dqn_routing_tf.keras')
+    agent, G = train(episodes=10, save_dir='models_test', seed=0)
+    print('Training finished. Model saved to models_test/dqn_routing_tf.keras')

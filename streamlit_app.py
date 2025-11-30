@@ -101,6 +101,13 @@ st.sidebar.subheader("Training Params")
 episodes = st.sidebar.number_input("Episodes", min_value=10, value=300)
 save_dir = st.sidebar.text_input("Save Directory", value="models_demo")
 seed = st.sidebar.number_input("Random Seed", value=0)
+batch_size = st.sidebar.selectbox("Batch Size", [16, 32, 64, 128], index=1)
+
+# Dynamic Epsilon Decay Calculation
+# We want epsilon to decay from 1.0 to 0.05 over roughly 80% of the episodes
+# decay = (0.05 / 1.0) ** (1 / (0.8 * episodes))
+epsilon_decay = (0.05) ** (1 / (0.8 * episodes))
+st.sidebar.caption(f"Calculated Decay Rate: {epsilon_decay:.5f}")
 
 st.sidebar.divider()
 
@@ -148,7 +155,9 @@ with tab_train:
         env = NetworkRoutingEnv(G, reward_mode='C', seed=seed)
         state_dim = env._get_state().shape[0]
         action_dim = env.num_nodes
-        agent = DQNAgent(state_dim, action_dim, graph=G, seed=seed)
+        action_dim = env.num_nodes
+        agent = DQNAgent(state_dim, action_dim, graph=G, seed=seed, 
+                        epsilon_decay=epsilon_decay, batch_size=batch_size)
         
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -182,10 +191,7 @@ with tab_train:
                 
                 # Update chart
                 chart_placeholder.line_chart(st.session_state.training_history)
-                
-                # Force garbage collection to prevent memory leaks
-                import gc
-                gc.collect()
+
         
         # Save model
         model_path = os.path.join(save_dir, 'dqn_routing_tf.keras')

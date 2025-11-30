@@ -119,7 +119,7 @@ if __name__ == '__main__':
     from train_dqn_tf import build_sample_graph
     
     # Load trained model
-    model_path = 'models_demo/dqn_routing_tf.keras'
+    model_path = 'models_test/dqn_routing_tf.keras'
     if not os.path.exists(model_path):
         print(f"No trained model found at {model_path}. Please run training first.")
         exit(1)
