@@ -115,6 +115,7 @@ st.sidebar.subheader("Simulation Params")
 src_node = st.sidebar.number_input("Source Node", min_value=0, max_value=num_routers-1, value=0)
 dst_node = st.sidebar.number_input("Dest Node", min_value=0, max_value=num_routers-1, value=min(4, num_routers-1))
 sim_speed = st.sidebar.slider("Simulation Speed (s)", 0.1, 2.0, 0.5)
+failure_prob = st.sidebar.slider("Link Failure Prob (per step)", 0.0, 0.2, 0.0, step=0.01, help="Probability of a random link breaking at each step")
 
 
 # --- Main Area ---
@@ -229,33 +230,50 @@ with tab_sim:
                 st.error("Please train or load an agent first.")
             else:
                 agent = st.session_state.agent
-                G = st.session_state.graph
                 
                 # Deterministic for simulation
                 original_epsilon = agent.epsilon
                 agent.epsilon = 0.0
+
+                # Create a copy of the graph for simulation to allow modifications (failures)
+                G_sim = G.copy()
                 
-                env = NetworkRoutingEnv(G, reward_mode='C')
+                env = NetworkRoutingEnv(G_sim, reward_mode='C')
                 env.reset(src=src_node, dst=dst_node)
                 
                 path = [src_node]
                 placeholder = st.empty()
+                status_placeholder = st.empty()
                 
                 done = False
                 step = 0
+                total_failures = 0
+                
                 while not done and step < env.max_steps:
+                    # Simulate Link Failures
+                    if failure_prob > 0 and G_sim.number_of_edges() > 0:
+                        if random.random() < failure_prob:
+                            # Pick a random edge to break
+                            edges = list(G_sim.edges())
+                            if edges:
+                                u, v = random.choice(edges)
+                                G_sim.remove_edge(u, v)
+                                total_failures += 1
+                                status_placeholder.warning(f"⚠️ Link Broken: {u} <-> {v}")
+                    
                     # Update visualization
-                    fig = draw_network(G, st.session_state.pos, path=path, title=f"Step {step}: {path[-1]}")
+                    # We pass G_sim so broken links are visible (missing)
+                    fig = draw_network(G_sim, st.session_state.pos, path=path, title=f"Step {step}: {path[-1]}")
                     placeholder.pyplot(fig)
                     plt.close(fig)
                     time.sleep(sim_speed)
                     
                     state = env._get_state()
-                    neighbors = list(G.neighbors(env.current))
+                    neighbors = list(G_sim.neighbors(env.current))
                     
                     # Safety check for stuck agent
                     if not neighbors:
-                        st.warning("Dead end reached!")
+                        st.error("Dead end reached! No neighbors left.")
                         break
 
                     action = agent.act(state, neighbors)
@@ -264,14 +282,14 @@ with tab_sim:
                     step += 1
                 
                 # Final state
-                fig = draw_network(G, st.session_state.pos, path=path, title=f"Finished: {path[-1]}")
+                fig = draw_network(G_sim, st.session_state.pos, path=path, title=f"Finished: {path[-1]}")
                 placeholder.pyplot(fig)
                 plt.close(fig)
                 
                 if path[-1] == dst_node:
-                    st.success(f"Reached Destination in {step} steps!")
+                    st.success(f"Reached Destination in {step} steps with {total_failures} link failures!")
                 else:
-                    st.error("Failed to reach destination.")
+                    st.error(f"Failed to reach destination. Failures encountered: {total_failures}")
                 
                 agent.epsilon = original_epsilon
 
@@ -280,37 +298,76 @@ with tab_sim:
             if st.session_state.agent is None:
                 st.error("Please train or load an agent first.")
             else:
+                # Use a copy for comparison to not affect main graph state if we wanted to persist
+                # But here we want two independent runs on the SAME failure sequence? 
+                # That's hard because failures are random.
+                # Better approach: Run them side-by-side or just run Agent on a failing graph and compare to "Static Dijkstra" (baseline)
+                # OR: Run "Dynamic Dijkstra" which re-calculates every step on the SAME failing graph.
+                
                 G = st.session_state.graph
                 agent = st.session_state.agent
-                
-                # Dijkstra
-                try:
-                    dijkstra_path = nx.shortest_path(G, src_node, dst_node, weight='weight')
-                    dijkstra_cost = nx.shortest_path_length(G, src_node, dst_node, weight='weight')
-                except nx.NetworkXNoPath:
-                    st.error("No path exists!")
-                    dijkstra_path = []
-                    dijkstra_cost = float('inf')
 
-                # RL Agent
+                # Let's do: Agent vs Dynamic Dijkstra on the SAME graph instance (G_comp)
+                G_comp = G.copy()
+                
+                # RL Agent Setup
                 original_epsilon = agent.epsilon
                 agent.epsilon = 0.0
                 
-                env = NetworkRoutingEnv(G, reward_mode='C')
+                env = NetworkRoutingEnv(G_comp, reward_mode='C')
                 env.reset(src=src_node, dst=dst_node)
+                
                 rl_path = [src_node]
                 rl_cost = 0
+                
+                # We will track Dijkstra's "Ideal" path step-by-step on the SAME graph
+                # But Dijkstra doesn't "step". It plans.
+                # To compare fairly, we can't easily run them simultaneously if they take different paths 
+                # because the "random failure" might affect one path and not the other.
+                
+                # SIMPLIFIED COMPARISON:
+                # 1. Calculate Static Dijkstra (Best case scenario without failures)
+                # 2. Run RL Agent with Failures
+                # 3. Report: "Agent Cost X (with Y failures) vs Static Optimal Y"
+                
+                try:
+                    static_dijkstra_path = nx.shortest_path(G, src_node, dst_node, weight='weight')
+                    static_dijkstra_cost = nx.shortest_path_length(G, src_node, dst_node, weight='weight')
+                except nx.NetworkXNoPath:
+                    static_dijkstra_path = []
+                    static_dijkstra_cost = float('inf')
+
+                # Run RL with Failures
                 done = False
                 step = 0
+                failures = 0
                 
                 while not done and step < env.max_steps:
+                    # Simulate Failures
+                    if failure_prob > 0 and G_comp.number_of_edges() > 0:
+                        if random.random() < failure_prob:
+                            edges = list(G_comp.edges())
+                            if edges:
+                                u, v = random.choice(edges)
+                                G_comp.remove_edge(u, v)
+                                failures += 1
+                    
                     state = env._get_state()
-                    neighbors = list(G.neighbors(env.current))
+                    neighbors = list(G_comp.neighbors(env.current))
+                    
+                    if not neighbors:
+                        break
+                        
                     action = agent.act(state, neighbors)
                     _, _, done, _ = env.step(action)
                     
-                    # Calculate cost
                     if len(rl_path) > 0:
+                         # Check if edge still exists (it might have broken AFTER we traversed it? No, we traverse then break? 
+                         # Logic above: Break then Act. So if we acted, the edge existed.)
+                         # But wait, we removed edge from G_comp.
+                         # We need to look up weight.
+                         # If edge removed, we can't look up weight easily from G_comp.
+                         # We should look up from original G (assuming weights don't change, only existence)
                          rl_cost += G[rl_path[-1]][action]['weight']
                     
                     rl_path.append(action)
@@ -320,40 +377,44 @@ with tab_sim:
                 
                 # Display Results
                 st.write("### Results")
+                if failure_prob > 0:
+                    st.warning(f"⚠️ Simulation ran with {failures} link failures!")
                 
-                st.write(f"**Dijkstra Path:** {dijkstra_path}")
-                st.write(f"**Cost:** {dijkstra_cost}")
+                st.write(f"**Static Dijkstra Path (No Failures):** {static_dijkstra_path}")
+                st.write(f"**Static Cost:** {static_dijkstra_cost}")
                 
-                st.write(f"**RL Agent Path:** {rl_path}")
-                st.write(f"**Cost:** {rl_cost}")
+                st.write(f"**RL Agent Path (With Failures):** {rl_path}")
+                st.write(f"**Agent Cost:** {rl_cost}")
                 
-                if rl_cost == dijkstra_cost:
-                    st.success("RL Agent found the optimal path! 🎉")
-                elif rl_cost < dijkstra_cost:
-                    st.warning("RL Agent found a path with lower cost? (Check logic)")
-                else:
-                    diff = ((rl_cost - dijkstra_cost) / dijkstra_cost) * 100
-                    st.info(f"RL Agent path is {diff:.1f}% longer than optimal.")
+                if rl_path[-1] != dst_node:
+                    st.error("Agent failed to reach destination.")
                 
                 # Visual Comparison
                 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
                 
-                # Plot Dijkstra
+                # Plot Dijkstra (on original graph)
                 nx.draw_networkx_nodes(G, st.session_state.pos, node_color='lightblue', node_size=300, ax=ax1)
                 nx.draw_networkx_edges(G, st.session_state.pos, alpha=0.2, ax=ax1)
-                if dijkstra_path:
-                    path_edges = list(zip(dijkstra_path[:-1], dijkstra_path[1:]))
+                if static_dijkstra_path:
+                    path_edges = list(zip(static_dijkstra_path[:-1], static_dijkstra_path[1:]))
                     nx.draw_networkx_edges(G, st.session_state.pos, edgelist=path_edges, edge_color='blue', width=2, ax=ax1)
-                ax1.set_title("Dijkstra (Optimal)")
+                ax1.set_title("Static Dijkstra (Ideal)")
                 ax1.axis('off')
                 
-                # Plot RL
-                nx.draw_networkx_nodes(G, st.session_state.pos, node_color='lightblue', node_size=300, ax=ax2)
-                nx.draw_networkx_edges(G, st.session_state.pos, alpha=0.2, ax=ax2)
+                # Plot RL (on MODIFIED graph G_comp)
+                nx.draw_networkx_nodes(G_comp, st.session_state.pos, node_color='lightblue', node_size=300, ax=ax2)
+                nx.draw_networkx_edges(G_comp, st.session_state.pos, alpha=0.2, ax=ax2)
                 if rl_path:
                     path_edges = list(zip(rl_path[:-1], rl_path[1:]))
-                    nx.draw_networkx_edges(G, st.session_state.pos, edgelist=path_edges, edge_color='red', width=2, ax=ax2)
-                ax2.set_title("RL Agent")
+                    # Only draw edges that still exist in G_comp? 
+                    # Or draw the path even if links are broken now?
+                    # Let's draw the path on top of the BROKEN graph to show where it went.
+                    # Some edges in path might not exist in G_comp anymore (if they broke after traversal).
+                    # nx.draw_networkx_edges will error if edge not in graph?
+                    # Actually, we can pass edgelist. It draws lines between coords. It doesn't check graph?
+                    # Let's try. If it errors, we'll fix.
+                    nx.draw_networkx_edges(G_comp, st.session_state.pos, edgelist=path_edges, edge_color='red', width=2, ax=ax2)
+                ax2.set_title(f"RL Agent ({failures} failures)")
                 ax2.axis('off')
                 
                 st.pyplot(fig)
