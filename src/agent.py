@@ -2,24 +2,28 @@ import random
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, models, optimizers
-from collections import deque
-try:
-    from src.debug_utils import debug_log
-except ImportError:
-    from debug_utils import debug_log
 
 
 class ReplayBuffer:
     def __init__(self, capacity=10000):
-        self.buffer = deque(maxlen=int(capacity))
+        self.capacity = int(capacity)
+        self.buffer = []
 
     def push(self, state, action, reward, next_state, done):
         self.buffer.append((state, action, reward, next_state, done))
+        if len(self.buffer) > self.capacity:
+            self.buffer.pop(0)
 
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
         states, actions, rewards, next_states, dones = zip(*batch)
-        return np.array(states), np.array(actions), np.array(rewards), np.array(next_states), np.array(dones)
+        return (
+            np.array(states),
+            np.array(actions),
+            np.array(rewards),
+            np.array(next_states),
+            np.array(dones)
+        )
 
     def __len__(self):
         return len(self.buffer)
@@ -40,6 +44,7 @@ class DQNAgent:
     def __init__(self, state_dim, action_dim, graph=None, lr=1e-3, gamma=0.95, epsilon=1.0,
                  epsilon_min=0.05, epsilon_decay=0.995, buffer_size=10000,
                  batch_size=32, target_update_freq=500, seed=None):
+
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.graph = graph
@@ -68,9 +73,10 @@ class DQNAgent:
     def act(self, state, valid_actions):
         # valid_actions: list of neighbor node indices
         if np.random.rand() < self.epsilon:
-            debug_log("Random action")
             return random.choice(valid_actions)
+
         q = self.model(state.reshape(1, -1), training=False).numpy()[0]
+
         # pick valid action with max q
         return max(valid_actions, key=lambda a: q[a])
 
@@ -80,64 +86,70 @@ class DQNAgent:
     def replay_train(self):
         if len(self.replay) < self.batch_size:
             return 0
-        
-        debug_log("Starting replay_train")
 
         states, actions, rewards, next_states, dones = self.replay.sample(self.batch_size)
-        
-        # Predict Q-values for current states and next states
+
         targets = self.model(states, training=False).numpy()
         next_qs = self.target(next_states, training=False).numpy()
 
-        # Vectorized target calculation
-        # If done, target is reward. Else reward + gamma * max(next_q)
-        
-        # We need to handle the graph-constrained next_max carefully.
-        # If we don't have the graph, we just take the max over all actions.
+        # For more accurate targets, mask the next-state Q-values to only valid neighbor actions
+        # (requires agent to have access to the graph). The state layout is expected to
+        # have the current-node one-hot in the first num_nodes entries.
         if self.graph is None:
-            next_max = np.max(next_qs, axis=1)
+            # Fallback for when graph is not known (standard DQN)
+            next_qs_main_model = self.model(next_states, training=False).numpy()
+            best_actions = np.argmax(next_qs_main_model, axis=1)
+            next_qs_target = self.target(next_states, training=False).numpy()
+            next_max = next_qs_target[np.arange(len(states)), best_actions]
+
         else:
-            # For graph-constrained, we need to mask invalid actions for each item in batch.
-            # This is hard to fully vectorize without an adjacency matrix.
-            # We'll do a semi-vectorized approach: pre-calculate maxes row-by-row only if needed.
-            
-            # Optimization: If the graph is static, we could cache adjacency.
-            # For now, we'll keep the logic but optimize the loop.
-            
-            next_max = np.zeros(self.batch_size)
+            # Graph-aware Double DQN
+            next_qs_main = self.model(next_states, training=False).numpy()
+            next_qs_target = self.target(next_states, training=False).numpy()
+
+            next_max_batch = []
             num_nodes = self.graph.number_of_nodes()
-            
-            # Extract next current nodes from one-hot encoding (first num_nodes elements)
-            next_cur_nodes = np.argmax(next_states[:, :num_nodes], axis=1)
-            
-            for i in range(self.batch_size):
+
+            for i in range(len(states)):
                 if dones[i]:
+                    next_max_batch.append(0.0)  # Value doesn't matter as it's multiplied by 0 (or not added)
                     continue
-                
-                next_cur = next_cur_nodes[i]
+
+                # Infer next current node from the next_state one-hot prefix
+                next_state_vec = next_states[i]
+                next_cur = int(np.argmax(next_state_vec[:num_nodes]))
                 neighbors = list(self.graph.neighbors(next_cur))
-                
+
                 if not neighbors:
-                    next_max[i] = np.max(next_qs[i]) # Fallback if no neighbors (dead end)
-                else:
-                    next_max[i] = np.max(next_qs[i][neighbors])
+                    # Dead end, value is effectively 0 for next step (or penalty already received)
+                    next_max_batch.append(0.0)
+                    continue
 
-        # Calculate target Q-values
-        # target = reward + gamma * next_max * (1 - done)
-        target_values = rewards + self.gamma * next_max * (1 - dones.astype(float))
-        
-        # Update the specific action indices in the targets array
-        # We use np.arange to select the row indices and actions for column indices
-        batch_indices = np.arange(self.batch_size)
-        targets[batch_indices, actions.astype(int)] = target_values
+                # Double DQN:
+                # 1. Select best action using MAIN model, restricted to valid neighbors
+                q_main_neighbors = next_qs_main[i][neighbors]
+                # Argmax returns index within the 'neighbors' list
+                best_neighbor_idx = np.argmax(q_main_neighbors)
+                best_action = neighbors[best_neighbor_idx]
 
-        debug_log("Training on batch")
-        try:
-            self.model.train_on_batch(states, targets)
-            debug_log("Finished train_on_batch")
-        except Exception as e:
-            debug_log(f"Error in train_on_batch: {e}")
-            raise e
+                # 2. Evaluate that action using TARGET model
+                next_max_batch.append(next_qs_target[i][best_action])
+
+            next_max = np.array(next_max_batch)
+
+        # Vectorized target calculation where possible, but here we iterated for graph logic
+        # If we didn't iterate, we would do:
+        # targets[range(len(states)), actions.astype(int)] = rewards + self.gamma * next_max * (1 - dones)
+
+        # Applying the updates to the targets array
+        for i in range(len(states)):
+            a = int(actions[i])
+            if dones[i]:
+                targets[i][a] = rewards[i]
+            else:
+                targets[i][a] = rewards[i] + self.gamma * next_max[i]
+
+        self.model.train_on_batch(states, targets)
 
         # epsilon decay
         if self.epsilon > self.epsilon_min:
