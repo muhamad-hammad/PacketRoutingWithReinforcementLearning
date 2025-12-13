@@ -2,6 +2,9 @@ import os
 import random
 import numpy as np
 import tensorflow as tf
+from tensorflow.keras import mixed_precision
+# Enable mixed precision if a GPU is available (helps speed up training)
+mixed_precision.set_global_policy('mixed_float16')
 from tensorflow.keras import layers, models, optimizers
 
 
@@ -51,6 +54,8 @@ class NodeAgent:
         self.batch_size = batch_size
         self.target_update_freq = target_update_freq
         self.train_steps = 0
+        # Forwarding table: (src, dst) -> next_hop
+        self.forwarding_table = {}
 
         if seed is not None:
             # unique seed per agent
@@ -127,6 +132,20 @@ class NodeAgent:
         # but here we just accept a full path
         self.model.save(path)
 
+    # ---------------------------------------------------------------------
+    # Forwarding‑table helpers
+    # ---------------------------------------------------------------------
+    def update_forwarding(self, src, dst, next_hop):
+        """Record the best next hop for a (src, dst) pair.
+        Called during evaluation or after a training step when the action
+        chosen by the policy is considered the current best.
+        """
+        self.forwarding_table[(src, dst)] = next_hop
+
+    def get_forwarding_table(self):
+        """Return the stored forwarding table (a dict)."""
+        return self.forwarding_table
+
     def load(self, path):
         self.model = tf.keras.models.load_model(path)
         self.update_target()
@@ -196,4 +215,13 @@ class AgentManager:
                 agent.load(path)
             else:
                 print(f"Warning: No model found for node {node} at {path}")
+
+    # ---------------------------------------------------------------------
+    # Forwarding‑table aggregation
+    # ---------------------------------------------------------------------
+    def get_all_forwarding_tables(self):
+        """Return a dict mapping node id → its forwarding table dict.
+        Useful for inspection after training/evaluation.
+        """
+        return {node: agent.get_forwarding_table() for node, agent in self.agents.items()}
 

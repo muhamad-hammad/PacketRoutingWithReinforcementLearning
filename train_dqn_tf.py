@@ -98,10 +98,30 @@ def train(episodes=500, save_dir='models', seed=0):
     except Exception as e:
         debug_log(f"Error plotting: {e}")
 
+    # ---------------------------------------------------------------------
+    # Export forwarding tables to markdown
+    # ---------------------------------------------------------------------
+    try:
+        tables = agent.get_all_forwarding_tables()
+        md_path = os.path.join(save_dir, 'forwarding_tables.md')
+        with open(md_path, 'w', encoding='utf-8') as f:
+            f.write('# Forwarding Tables (Learned by each NodeAgent)\n\n')
+            for node_id, ft in tables.items():
+                f.write(f'## Node {node_id}\n')
+                if ft:
+                    f.write('| Source | Destination | Next Hop |\n')
+                    f.write('|---|---|---|\n')
+                    for (src, dst), nxt in ft.items():
+                        f.write(f'| {src} | {dst} | {nxt} |\n')
+                else:
+                    f.write('_No entries recorded._\n')
+                f.write('\n')
+        debug_log(f"Forwarding tables written to {md_path}")
+    except Exception as e:
+        debug_log(f"Error writing forwarding tables: {e}")
     return agent, G
 
 
 if __name__ == '__main__':
     agent, G = train(episodes=10, save_dir='models_test', seed=0)
     print('Training finished. Models saved to models_test/')
-
