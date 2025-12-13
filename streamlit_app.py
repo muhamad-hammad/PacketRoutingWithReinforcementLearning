@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 
 from src.env import NetworkRoutingEnv
-from src.agent import DQNAgent
+from src.agent import AgentManager
 import evaluate
 
 
@@ -236,3 +236,182 @@ with col2:
 # Tabs
 # ======================================================
 tab_train, tab_sim = st.tabs(["Training", "Simulation & Comparison"])
+
+with tab_train:
+    st.header("Train the RL Agent")
+    
+    col_t1, col_t2 = st.columns(2)
+    
+    with col_t1:
+        if st.button("Start Training"):
+            G_real = st.session_state.graph_real
+            
+            # Re-init agent manager
+            env_temp = NetworkRoutingEnv(G_real, reward_mode='C')
+            state_dim = env_temp._get_state().shape[0]
+            action_dim = env_temp.num_nodes
+            
+            # Use AgentManager instead of DQNAgent
+            from src.agent import AgentManager
+            agent = AgentManager(state_dim, action_dim, graph=G_real, seed=seed)
+            st.session_state.agent = agent
+            st.session_state.training_history = []
+            
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            chart_placeholder = st.empty()
+            
+            env = NetworkRoutingEnv(G_real, reward_mode='C', seed=seed)
+            total_rewards = []
+            
+            for ep in range(episodes):
+                state = env.reset()
+                ep_reward = 0
+                done = False
+                
+                while not done:
+                    current_node = env.current
+                    valid_actions = list(G_real.neighbors(current_node))
+                    
+                    # AgentManager act
+                    action = agent.act(state, valid_actions, current_node)
+                    
+                    next_state, reward, done, info = env.step(action)
+                    
+                    # AgentManager remember & train specific agent
+                    agent.remember(state, action, reward, next_state, done, current_node)
+                    agent.replay_train(current_node)
+                    
+                    state = next_state
+                    ep_reward += reward
+                
+                total_rewards.append(ep_reward)
+                st.session_state.training_history = total_rewards
+                
+                # Update UI
+                if (ep + 1) % 10 == 0:
+                    progress = (ep + 1) / episodes
+                    progress_bar.progress(progress)
+                    
+                    avg_reward = np.mean(total_rewards[-50:])
+                    status_text.text(f"Episode {ep+1}/{episodes} | Avg Reward (last 50): {avg_reward:.2f} | Epsilon: {agent.epsilon:.3f}")
+                    
+                    # Live chart
+                    fig, ax = plt.subplots(figsize=(6, 2))
+                    ax.plot(total_rewards, label='Reward')
+                    ax.set_xlabel('Episode')
+                    ax.set_ylabel('Total Reward')
+                    ax.legend()
+                    chart_placeholder.pyplot(fig)
+                    plt.close(fig)
+            
+            st.success("Training Complete!")
+            
+            # Save model
+            if save_dir:
+                os.makedirs(save_dir, exist_ok=True)
+                agent.save(save_dir) # AgentManager.save takes directory
+                st.info(f"Models saved to {save_dir}")
+
+with tab_sim:
+    st.header("Simulation & Comparison")
+    
+    if st.button("Simulate Routing"):
+        if st.session_state.agent is None:
+            st.error("Please train the agent first!")
+        else:
+            agent = st.session_state.agent
+            G_real = st.session_state.graph_real
+            s = src_node
+            d = dst_node
+            
+            # -- RL Agent Run --
+            # We need to temporarily silence epsilon for evaluation
+            old_eps = agent.epsilon
+            agent.epsilon = 0.0 # Deterministic
+            
+            env = NetworkRoutingEnv(G_real, reward_mode='C')
+            env.reset(src=s, dst=d)
+            
+            path_agent = [s]
+            cost_agent = 0
+            
+            placeholder_map = st.empty()
+            status_sim = st.empty()
+            
+            for step in range(num_routers * 2):
+                current_node = env.current
+                
+                # Visualize current step
+                fig_sim = draw_network(
+                    st.session_state.graph_vis,
+                    st.session_state.pos,
+                    path=path_agent,
+                    path_color="orange",
+                    title=f"Step {step}: At node {current_node}"
+                )
+                placeholder_map.pyplot(fig_sim)
+                plt.close(fig_sim)
+                time.sleep(sim_speed)
+                
+                valid_actions = list(G_real.neighbors(current_node))
+                if not valid_actions:
+                    status_sim.error("Dead end!")
+                    break
+                
+                state = env._get_state()
+                # AgentManager act
+                action = agent.act(state, valid_actions, current_node)
+                
+                _, reward, done, _ = env.step(action)
+                
+                # Calculate real cost (weight)
+                edge_weight = G_real[current_node][action]['weight']
+                cost_agent += edge_weight
+                
+                path_agent.append(action)
+                
+                if done:
+                    if env.current == d:
+                        status_sim.success(f"Reached Destination! Total Cost: {cost_agent}")
+                    else:
+                        status_sim.error("Transformation limit reached or failed.")
+                    break
+            
+            agent.epsilon = old_eps # Restore epsilon
+            
+            # -- Dijkstra Comparison --
+            st.subheader("Comparison with Dijkstra")
+            try:
+                path_dij = nx.shortest_path(G_real, source=s, target=d, weight='weight')
+                cost_dij = nx.shortest_path_length(G_real, source=s, target=d, weight='weight')
+                
+                col_res1, col_res2 = st.columns(2)
+                
+                with col_res1:
+                    st.markdown("**RL Agent**")
+                    st.write(f"Path: {path_agent}")
+                    st.write(f"Cost: {cost_agent}")
+                    
+                with col_res2:
+                    st.markdown("**Dijkstra (Optimal)**")
+                    st.write(f"Path: {path_dij}")
+                    st.write(f"Cost: {cost_dij}")
+                
+                # Final visualization comp
+                fig_comp = draw_network(
+                    st.session_state.graph_vis,
+                    st.session_state.pos,
+                    path=path_agent,
+                    path_color="orange",
+                    title="Agent Path (Orange) vs Dijkstra (Green overlay)"
+                )
+                
+                # Overlay Dijkstra
+                # We can't easily overlay efficiently with this simple helper, 
+                # but we can just show the agent path and let user compare text.
+                # Or we can do a quick hack to show Dijkstra in green if we wanted.
+                st.pyplot(fig_comp)
+                
+            except nx.NetworkXNoPath:
+                st.error("No path exists between these nodes!")

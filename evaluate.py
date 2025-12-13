@@ -17,11 +17,15 @@ def extract_route_from_agent(agent, G, src, dst, max_steps=None):
     max_steps = max_steps or env.max_steps
 
     for _ in range(max_steps):
-        neighbors = list(G.neighbors(env.current))
+        current_node = env.current
+        neighbors = list(G.neighbors(current_node))
         if not neighbors:
             break
         state = env._get_state()
-        action = agent.act(state, neighbors)
+        
+        # Pass current_node to agent manager
+        action = agent.act(state, neighbors, current_node)
+        
         _, reward, done, _ = env.step(action)
         path.append(action)
         if reward < 0:
@@ -115,20 +119,20 @@ def analyze_stats(stats):
 
 if __name__ == '__main__':
     import matplotlib.pyplot as plt
-    from src.agent import DQNAgent
+    from src.agent import AgentManager
     from train_dqn_tf import build_sample_graph
     
     # Load trained model
-    model_path = 'models_test/dqn_routing_tf.keras'
-    if not os.path.exists(model_path):
-        print(f"No trained model found at {model_path}. Please run training first.")
+    model_dir = 'models_test'
+    if not os.path.exists(model_dir):
+        print(f"No trained model directory found at {model_dir}. Please run training first.")
         exit(1)
     
     # Initialize environment and agent
     G = build_sample_graph()
     state_dim = NetworkRoutingEnv(G)._get_state().shape[0]
-    agent = DQNAgent(state_dim, G.number_of_nodes(), graph=G)
-    agent.load(model_path)
+    agent = AgentManager(state_dim, G.number_of_nodes(), graph=G)
+    agent.load(model_dir)
     
     # Run evaluation
     print("Running evaluation...")
@@ -151,3 +155,4 @@ if __name__ == '__main__':
         plt.close(fig)
     
     print("\nRoute visualizations saved to models_demo/route_comparison_*.png")
+

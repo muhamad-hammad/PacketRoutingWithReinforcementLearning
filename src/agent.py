@@ -1,144 +1,199 @@
-"""
-Train a DQN agent for routing on a small NetworkX graph.
-This script uses src/env.py and src/agent.py.
-"""
-
 import os
 import random
 import numpy as np
-import networkx as nx
-import matplotlib.pyplot as plt
-
-from src.env import NetworkRoutingEnv
-from src.agent import DQNAgent
+import tensorflow as tf
+from tensorflow.keras import layers, models, optimizers
 
 
-def build_sample_graph():
-    G = nx.Graph()
+class ReplayBuffer:
+    def __init__(self, capacity=10000):
+        self.capacity = int(capacity)
+        self.buffer = []
 
-    edges = [
-        (0, 1, 1.0),
-        (0, 2, 2.5),
-        (1, 2, 1.5),
-        (1, 3, 2.0),
-        (2, 4, 1.0),
-        (3, 4, 0.5),
-        (3, 5, 3.0),
-        (4, 5, 2.5),
-    ]
+    def push(self, state, action, reward, next_state, done):
+        self.buffer.append((state, action, reward, next_state, done))
+        if len(self.buffer) > self.capacity:
+            self.buffer.pop(0)
 
-    G.add_weighted_edges_from(edges)
-    return G
+    def sample(self, batch_size):
+        batch = random.sample(self.buffer, batch_size)
+        states, actions, rewards, next_states, dones = zip(*batch)
+        return np.array(states), np.array(actions), np.array(rewards), np.array(next_states), np.array(dones)
+
+    def __len__(self):
+        return len(self.buffer)
 
 
-def train(episodes=500, save_dir="models", seed=0):
-    random.seed(seed)
-    np.random.seed(seed)
+def build_model(input_dim, output_dim, lr=1e-3):
+    model = models.Sequential([
+        layers.Input(shape=(input_dim,)),
+        layers.Dense(128, activation='relu'),
+        layers.Dense(128, activation='relu'),
+        layers.Dense(output_dim)
+    ])
+    model.compile(optimizer=optimizers.Adam(learning_rate=lr), loss='mse')
+    return model
 
-    G = build_sample_graph()
-    env = NetworkRoutingEnv(G, reward_mode="C", seed=seed)
 
-    state_dim = env._get_state().shape[0]
-    action_dim = env.num_nodes
 
-    agent = DQNAgent(state_dim, action_dim, graph=G, seed=seed)
+class NodeAgent:
+    def __init__(self, state_dim, action_dim, node_id, graph=None, lr=1e-3, gamma=0.95, epsilon=1.0,
+                 epsilon_min=0.05, epsilon_decay=0.995, buffer_size=10000,
+                 batch_size=32, target_update_freq=500, seed=None):
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.node_id = node_id
+        self.graph = graph
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.epsilon_min = epsilon_min
+        self.epsilon_decay = epsilon_decay
+        self.batch_size = batch_size
+        self.target_update_freq = target_update_freq
+        self.train_steps = 0
 
-    os.makedirs(save_dir, exist_ok=True)
+        if seed is not None:
+            # unique seed per agent
+            random.seed(seed + node_id)
+            np.random.seed(seed + node_id)
+            tf.random.set_seed(seed + node_id)
 
-    rewards = []
+        self.model = build_model(state_dim, action_dim, lr=lr)
+        self.target = build_model(state_dim, action_dim, lr=lr)
+        self.update_target()
 
-    # --------------------------------------------------
-    # Dynamic epsilon decay
-    # --------------------------------------------------
-    target_decay_episodes = 0.8 * episodes
-    if target_decay_episodes < 1:
-        target_decay_episodes = 1
+        self.replay = ReplayBuffer(capacity=buffer_size)
 
-    calculated_decay = np.exp(
-        np.log(agent.epsilon_min / agent.epsilon) / target_decay_episodes
-    )
-    agent.epsilon_decay = calculated_decay
+    def update_target(self):
+        self.target.set_weights(self.model.get_weights())
 
-    print(f"Training with Dynamic Decay: {agent.epsilon_decay:.4f}")
+    def act(self, state, valid_actions):
+        # valid_actions: list of neighbor node indices
+        if np.random.rand() < self.epsilon:
+            return random.choice(valid_actions)
+        q = self.model.predict(state.reshape(1, -1), verbose=0)[0]
+        # pick valid action with max q
+        return max(valid_actions, key=lambda a: q[a])
 
-    # --------------------------------------------------
-    # Warmup Phase
-    # --------------------------------------------------
-    warmup_steps = 1000
-    print("Warmup Phase...")
+    def remember(self, s, a, r, ns, d):
+        self.replay.push(s, a, r, ns, d)
 
-    w_step = 0
-    while w_step < warmup_steps:
-        w_state = env.reset()
-        w_done = False
+    def replay_train(self):
+        if len(self.replay) < self.batch_size:
+            return 0
 
-        while not w_done and w_step < warmup_steps:
-            w_valid_actions = list(G.neighbors(env.current))
-            w_action = random.choice(w_valid_actions)
+        states, actions, rewards, next_states, dones = self.replay.sample(self.batch_size)
+        targets = self.model.predict(states, verbose=0)
+        next_qs = self.target.predict(next_states, verbose=0)
 
-            w_next_state, w_reward, w_done, _ = env.step(w_action)
-            agent.remember(
-                w_state,
-                w_action,
-                w_reward,
-                w_next_state,
-                w_done,
+        # For more accurate targets, mask the next-state Q-values to only valid neighbor actions
+        # (requires agent to have access to the graph). The state layout is expected to
+        # have the current-node one-hot in the first num_nodes entries.
+        for i in range(len(states)):
+            a = int(actions[i])
+            if dones[i]:
+                targets[i][a] = rewards[i]
+            else:
+                if self.graph is None:
+                    # fallback: take max over all outputs
+                    next_max = np.max(next_qs[i])
+                else:
+                    # infer next current node from the next_state one-hot prefix
+                    num_nodes = self.graph.number_of_nodes()
+                    next_state = next_states[i]
+                    next_cur = int(np.argmax(next_state[:num_nodes]))
+                    neighbors = list(self.graph.neighbors(next_cur))
+                    if len(neighbors) == 0:
+                        next_max = np.max(next_qs[i])
+                    else:
+                        next_max = np.max(next_qs[i][neighbors])
+
+                targets[i][a] = rewards[i] + self.gamma * next_max
+
+        self.model.fit(states, targets, epochs=1, verbose=0)
+
+        # epsilon decay
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+
+        self.train_steps += 1
+        if self.train_steps % self.target_update_freq == 0:
+            self.update_target()
+
+        return 1
+
+    def save(self, path):
+        # We'll save with a suffix for the node_id in the manager, 
+        # but here we just accept a full path
+        self.model.save(path)
+
+    def load(self, path):
+        self.model = tf.keras.models.load_model(path)
+        self.update_target()
+
+
+class AgentManager:
+    """
+    Manages a collection of NodeAgents, one for each node in the graph.
+    """
+    def __init__(self, state_dim, action_dim, graph, seed=0, **kwargs):
+        self.agents = {}
+        self.graph = graph
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        
+        nodes = list(graph.nodes())
+        for node in nodes:
+            self.agents[node] = NodeAgent(
+                state_dim, action_dim, node_id=node, graph=graph, seed=seed, **kwargs
             )
 
-            w_state = w_next_state
-            w_step += 1
+    def act(self, state, valid_actions, current_node):
+        return self.agents[current_node].act(state, valid_actions)
 
-    # --------------------------------------------------
-    # Training Loop
-    # --------------------------------------------------
-    for ep in range(episodes):
-        state = env.reset()
-        total_reward = 0.0
-        done = False
+    def remember(self, s, a, r, ns, d, current_node):
+        self.agents[current_node].remember(s, a, r, ns, d)
 
-        while not done:
-            valid_actions = list(G.neighbors(env.current))
-            action = agent.act(state, valid_actions)
+    def replay_train(self, current_node=None):
+        # We can choose to train all agents or just the one active
+        # For simplicity, let's train ONLY the active agent per step
+        if current_node is not None:
+             return self.agents[current_node].replay_train()
+        
+        # Or if no node specified, train all (heavy!)
+        total_loss = 0
+        for agent in self.agents.values():
+            total_loss += agent.replay_train()
+        return total_loss
 
-            next_state, reward, done, info = env.step(action)
-            agent.remember(state, action, reward, next_state, done)
-            agent.replay_train()
+    @property
+    def epsilon(self):
+        # Return average epsilon for logging
+        epsilons = [a.epsilon for a in self.agents.values()]
+        return np.mean(epsilons) if epsilons else 1.0
 
-            state = next_state
-            total_reward += reward
+    @property
+    def epsilon_min(self):
+        # Just return one of them or min
+        return 0.05
 
-        rewards.append(total_reward)
+    @epsilon.setter
+    def epsilon(self, value):
+        # Force set epsilon for all agents (e.g. for evaluation)
+        for agent in self.agents.values():
+            agent.epsilon = value
 
-        if (ep + 1) % 50 == 0 or ep == 0:
-            avg_recent = np.mean(rewards[-50:])
-            print(
-                f"Ep {ep + 1}/{episodes}  "
-                f"TotalReward={total_reward:.2f}  "
-                f"Avg50={avg_recent:.2f}  "
-                f"Eps={agent.epsilon:.3f}"
-            )
+    def save(self, base_dir):
+        os.makedirs(base_dir, exist_ok=True)
+        for node, agent in self.agents.items():
+            path = os.path.join(base_dir, f"agent_node_{node}.keras")
+            agent.save(path)
 
-    # --------------------------------------------------
-    # Save model
-    # --------------------------------------------------
-    model_path = os.path.join(save_dir, "dqn_routing_tf.keras")
-    agent.save(model_path)
+    def load(self, base_dir):
+        for node, agent in self.agents.items():
+            path = os.path.join(base_dir, f"agent_node_{node}.keras")
+            if os.path.exists(path):
+                agent.load(path)
+            else:
+                print(f"Warning: No model found for node {node} at {path}")
 
-    # --------------------------------------------------
-    # Plot learning curve
-    # --------------------------------------------------
-    plt.figure()
-    plt.plot(rewards)
-    plt.xlabel("Episode")
-    plt.ylabel("Total reward")
-    plt.title("Learning curve")
-    plt.grid(True)
-    plt.savefig(os.path.join(save_dir, "learning_curve.png"))
-    plt.close()
-
-    return agent, G
-
-
-if _name_ == "_main_":
-    agent, G = train(episodes=300, save_dir="models_demo", seed=0)
-    print("Training finished. Model saved to models_demo/dqn_routing_tf.keras")

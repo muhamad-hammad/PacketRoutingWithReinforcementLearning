@@ -13,7 +13,7 @@ import tensorflow as tf
 tf.config.run_functions_eagerly(True)
 
 from src.env import NetworkRoutingEnv
-from src.agent import DQNAgent
+from src.agent import AgentManager
 try:
     from src.debug_utils import debug_log
 except ImportError:
@@ -40,7 +40,8 @@ def train(episodes=500, save_dir='models', seed=0):
     state_dim = env._get_state().shape[0]
     action_dim = env.num_nodes
 
-    agent = DQNAgent(state_dim, action_dim, graph=G, seed=seed)
+    # Multi-Agent Manager
+    agent = AgentManager(state_dim, action_dim, graph=G, seed=seed)
 
     os.makedirs(save_dir, exist_ok=True)
     rewards = []
@@ -51,37 +52,36 @@ def train(episodes=500, save_dir='models', seed=0):
         done = False
 
         while not done:
-            valid_actions = list(G.neighbors(env.current))
-            # debug_log("Acting")
-            action = agent.act(state, valid_actions)
-            # debug_log("Stepping")
-            next_state, reward, done, info = env.step(action)
-            agent.remember(state, action, reward, next_state, done)
+            current_node = env.current
+            valid_actions = list(G.neighbors(current_node))
             
-            debug_log(f"Step: ep={ep}, steps={env.steps}")
-            agent.replay_train()
-            debug_log("Replay done")
+            # Action selection by the specific node agent
+            action = agent.act(state, valid_actions, current_node)
+            
+            next_state, reward, done, info = env.step(action)
+            
+            # Store experience in that specific node agent's buffer
+            agent.remember(state, action, reward, next_state, done, current_node)
+            
+            # Train that specific agent
+            agent.replay_train(current_node)
+            
             state = next_state
             total_reward += reward
-        debug_log(f"Episode {ep} done")
-
+        
         rewards.append(total_reward)
 
         if (ep + 1) % 50 == 0 or ep == 0:
             avg_recent = np.mean(rewards[-50:])
-            print(f'Ep {ep+1}/{episodes}  TotalReward={total_reward:.2f}  Avg50={avg_recent:.2f}  Eps={agent.epsilon:.3f}')
+            # agent.epsilon is now the average epsilon across all agents
+            print(f'Ep {ep+1}/{episodes}  TotalReward={total_reward:.2f}  Avg50={avg_recent:.2f}  AvgEps={agent.epsilon:.3f}')
 
-    model_path = os.path.join(save_dir, 'dqn_routing_tf.keras')
-    debug_log(f"Saving model to {model_path}")
+    debug_log(f"Saving models to {save_dir}")
     try:
-        agent.save(model_path)
-        debug_log("Model saved successfully")
+        agent.save(save_dir)
+        debug_log("Models saved successfully")
     except Exception as e:
-        debug_log(f"Error saving model: {e}")
-        # Try saving weights only as fallback
-        weights_path = os.path.join(save_dir, 'dqn_routing_weights.h5')
-        debug_log(f"Trying to save weights to {weights_path}")
-        agent.model.save_weights(weights_path)
+        debug_log(f"Error saving models: {e}")
 
     # Plot learning curve
     debug_log("Plotting learning curve")
@@ -103,4 +103,5 @@ def train(episodes=500, save_dir='models', seed=0):
 
 if __name__ == '__main__':
     agent, G = train(episodes=10, save_dir='models_test', seed=0)
-    print('Training finished. Model saved to models_test/dqn_routing_tf.keras')
+    print('Training finished. Models saved to models_test/')
+
