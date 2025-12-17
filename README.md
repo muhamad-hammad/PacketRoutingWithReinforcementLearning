@@ -2,9 +2,18 @@
 
 An interactive GUI application demonstrating Deep Q-Learning (DQN) for packet routing on network topologies. The agent learns to find efficient routes between nodes, competing with traditional algorithms like Dijkstra's shortest path.
 
+**🆕 NEW**: Now supports **two DQN architectures** - choose between **Multi-Agent (distributed)** with per-router memory or **Universal (centralized)** for simpler, faster training! [Learn more →](ARCHITECTURE_COMPARISON.md)
+
 ![GUI Screenshot](models_demo/gui_snapshot.png)
 
 ## Features
+
+### 🏗️ Dual Architecture Support (NEW!)
+- **Multi-Agent Architecture**: One agent per router with individual forwarding tables
+- **Universal Architecture**: Single centralized agent for all routing decisions
+- Easy selection via Streamlit GUI or command-line parameter
+- Automatic detection in evaluation scripts
+- [Detailed comparison and usage guide](ARCHITECTURE_COMPARISON.md)
 
 ### Interactive Training and Visualization
 - Real-time visualization of the training process

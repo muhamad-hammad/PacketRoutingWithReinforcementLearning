@@ -1,7 +1,4 @@
-"""Train a DQN agent for routing on a small NetworkX graph.
-
-This script uses `src/env.py` and `src/agent.py`.
-"""
+"""Train a DQN agent for packet routing."""
 import os
 import random
 import numpy as np
@@ -13,7 +10,7 @@ import tensorflow as tf
 tf.config.run_functions_eagerly(True)
 
 from src.env import NetworkRoutingEnv
-from src.agent import AgentManager
+from src.agent import DQNAgent, AgentManager
 try:
     from src.debug_utils import debug_log
 except ImportError:
@@ -31,7 +28,9 @@ def build_sample_graph():
     return G
 
 
-def train(episodes=500, save_dir='models', seed=0):
+def train(episodes=500, save_dir='models', seed=0, agent_type='multi-agent', 
+          batch_size=32, buffer_size=10000, train_freq=1):
+    """Train a DQN agent for packet routing."""
     random.seed(seed)
     np.random.seed(seed)
 
@@ -40,8 +39,18 @@ def train(episodes=500, save_dir='models', seed=0):
     state_dim = env._get_state().shape[0]
     action_dim = env.num_nodes
 
-    # Multi-Agent Manager
-    agent = AgentManager(state_dim, action_dim, graph=G, seed=seed)
+    if agent_type == 'universal':
+        debug_log("Using Universal DQN Agent")
+        agent = DQNAgent(state_dim, action_dim, graph=G, seed=seed,
+                        batch_size=batch_size, buffer_size=buffer_size)
+        is_multi_agent = False
+    else:
+        debug_log("Using Multi-Agent Architecture")
+        agent = AgentManager(state_dim, action_dim, graph=G, seed=seed,
+                           batch_size=batch_size, buffer_size=buffer_size)
+        is_multi_agent = True
+    
+    debug_log(f"Config: Batch={batch_size}, TrainFreq={train_freq}x, Buffer={buffer_size}")
 
     os.makedirs(save_dir, exist_ok=True)
     rewards = []
@@ -53,18 +62,29 @@ def train(episodes=500, save_dir='models', seed=0):
 
         while not done:
             current_node = env.current
+            previous_node = env.previous
             valid_actions = list(G.neighbors(current_node))
             
-            # Action selection by the specific node agent
-            action = agent.act(state, valid_actions, current_node)
+            if is_multi_agent:
+                action = agent.act(state, valid_actions, current_node, avoid_node=previous_node)
+            else:
+                action = agent.act(state, valid_actions, avoid_node=previous_node)
             
             next_state, reward, done, info = env.step(action)
             
-            # Store experience in that specific node agent's buffer
-            agent.remember(state, action, reward, next_state, done, current_node)
+            if 'immediate_loop' in info:
+                debug_log(f"Immediate loop at episode {ep+1}")
+            elif 'excessive_loops' in info:
+                debug_log(f"Excessive looping at episode {ep+1}")
             
-            # Train that specific agent
-            agent.replay_train(current_node)
+            if is_multi_agent:
+                agent.remember(state, action, reward, next_state, done, current_node)
+                for _ in range(train_freq):
+                    agent.replay_train(current_node)
+            else:
+                agent.remember(state, action, reward, next_state, done)
+                for _ in range(train_freq):
+                    agent.replay_train()
             
             state = next_state
             total_reward += reward
@@ -73,55 +93,57 @@ def train(episodes=500, save_dir='models', seed=0):
 
         if (ep + 1) % 50 == 0 or ep == 0:
             avg_recent = np.mean(rewards[-50:])
-            # agent.epsilon is now the average epsilon across all agents
-            print(f'Ep {ep+1}/{episodes}  TotalReward={total_reward:.2f}  Avg50={avg_recent:.2f}  AvgEps={agent.epsilon:.3f}')
+            eps_str = f"AvgEps={agent.epsilon:.3f}" if is_multi_agent else f"Eps={agent.epsilon:.3f}"
+            print(f'Ep {ep+1}/{episodes}  Reward={total_reward:.2f}  Avg50={avg_recent:.2f}  {eps_str}')
 
-    debug_log(f"Saving models to {save_dir}")
+    debug_log(f"Saving to {save_dir}")
     try:
-        agent.save(save_dir)
-        debug_log("Models saved successfully")
+        if is_multi_agent:
+            agent.save(save_dir)
+            debug_log("Multi-agent models saved")
+        else:
+            model_path = os.path.join(save_dir, 'dqn_routing_tf.keras')
+            agent.save(model_path)
+            debug_log(f"Universal model saved to {model_path}")
     except Exception as e:
-        debug_log(f"Error saving models: {e}")
+        debug_log(f"Error saving: {e}")
 
-    # Plot learning curve
-    debug_log("Plotting learning curve")
     try:
         plt.figure()
         plt.plot(rewards)
         plt.xlabel('Episode')
         plt.ylabel('Total reward')
-        plt.title('Learning curve')
+        plt.title(f'Learning curve ({agent_type})')
         plt.grid(True)
         plt.savefig(os.path.join(save_dir, 'learning_curve.png'))
         plt.close()
-        debug_log("Plotting finished")
+        debug_log("Learning curve saved")
     except Exception as e:
         debug_log(f"Error plotting: {e}")
 
-    # ---------------------------------------------------------------------
-    # Export forwarding tables to markdown
-    # ---------------------------------------------------------------------
-    try:
-        tables = agent.get_all_forwarding_tables()
-        md_path = os.path.join(save_dir, 'forwarding_tables.md')
-        with open(md_path, 'w', encoding='utf-8') as f:
-            f.write('# Forwarding Tables (Learned by each NodeAgent)\n\n')
-            for node_id, ft in tables.items():
-                f.write(f'## Node {node_id}\n')
-                if ft:
-                    f.write('| Source | Destination | Next Hop |\n')
-                    f.write('|---|---|---|\n')
-                    for (src, dst), nxt in ft.items():
-                        f.write(f'| {src} | {dst} | {nxt} |\n')
-                else:
-                    f.write('_No entries recorded._\n')
-                f.write('\n')
-        debug_log(f"Forwarding tables written to {md_path}")
-    except Exception as e:
-        debug_log(f"Error writing forwarding tables: {e}")
+    if is_multi_agent:
+        try:
+            tables = agent.get_all_forwarding_tables()
+            md_path = os.path.join(save_dir, 'forwarding_tables.md')
+            with open(md_path, 'w', encoding='utf-8') as f:
+                f.write('# Forwarding Tables\n\n')
+                for node_id, ft in tables.items():
+                    f.write(f'## Node {node_id}\n')
+                    if ft:
+                        f.write('| Source | Destination | Next Hop |\n')
+                        f.write('|---|---|---|\n')
+                        for (src, dst), nxt in ft.items():
+                            f.write(f'| {src} | {dst} | {nxt} |\n')
+                    else:
+                        f.write('_No entries._\n')
+                    f.write('\n')
+            debug_log(f"Forwarding tables written")
+        except Exception as e:
+            debug_log(f"Error writing tables: {e}")
+    
     return agent, G
 
 
 if __name__ == '__main__':
     agent, G = train(episodes=10, save_dir='models_test', seed=0)
-    print('Training finished. Models saved to models_test/')
+    print('Training finished.')

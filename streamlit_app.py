@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 
 from src.env import NetworkRoutingEnv
-from src.agent import AgentManager
+from src.agent import DQNAgent, AgentManager
 import evaluate
 
 
@@ -178,9 +178,54 @@ if st.sidebar.button("New Network"):
 st.sidebar.divider()
 
 st.sidebar.subheader("Training Params")
+
+# Agent Architecture Selection
+agent_architecture = st.sidebar.radio(
+    "Agent Architecture",
+    options=["Multi-Agent (Distributed)", "Universal (Single Agent)"],
+    index=0,
+    help="Multi-Agent: Each router has its own agent with memory. Universal: One centralized agent for all routers."
+)
+
+# Convert to internal format
+agent_type = "multi-agent" if "Multi-Agent" in agent_architecture else "universal"
+
+# Display architecture info
+if agent_type == "multi-agent":
+    st.sidebar.info("🔹 **Multi-Agent**: Each router learns independently with its own forwarding table")
+else:
+    st.sidebar.info("🔹 **Universal**: Single agent handles all routing decisions")
+
 episodes = st.sidebar.number_input("Episodes", min_value=10, value=1000)
 save_dir = st.sidebar.text_input("Save Directory", value="models_demo")
 seed = st.sidebar.number_input("Random Seed", value=0)
+
+# Advanced Training Settings
+with st.sidebar.expander("⚙️ Advanced Training Settings"):
+    batch_size = st.number_input(
+        "Batch Size", 
+        min_value=8, 
+        max_value=256, 
+        value=32,
+        help="Number of experiences sampled from replay buffer for each training step"
+    )
+    
+    train_freq = st.number_input(
+        "Training Steps per Action",
+        min_value=1,
+        max_value=10,
+        value=1,
+        help="How many times to train on batches after each environment step"
+    )
+    
+    buffer_size = st.number_input(
+        "Replay Buffer Size",
+        min_value=1000,
+        max_value=100000,
+        value=10000,
+        step=1000,
+        help="Maximum number of experiences to store in replay buffer"
+    )
 
 st.sidebar.divider()
 
@@ -246,16 +291,36 @@ with tab_train:
         if st.button("Start Training"):
             G_real = st.session_state.graph_real
             
-            # Re-init agent manager
+            # Re-init agent based on selected architecture
             env_temp = NetworkRoutingEnv(G_real, reward_mode='C')
             state_dim = env_temp._get_state().shape[0]
             action_dim = env_temp.num_nodes
             
-            # Use AgentManager instead of DQNAgent
-            from src.agent import AgentManager
-            agent = AgentManager(state_dim, action_dim, graph=G_real, seed=seed)
+            # Import both agent types
+            from src.agent import DQNAgent, AgentManager
+            
+            # Create agent based on user selection
+            if agent_type == "multi-agent":
+                st.info("🤖 Initializing Multi-Agent Architecture (one agent per router)...")
+                agent = AgentManager(
+                    state_dim, action_dim, graph=G_real, seed=seed,
+                    batch_size=batch_size, buffer_size=buffer_size
+                )
+                is_multi_agent = True
+            else:
+                st.info("🤖 Initializing Universal Agent Architecture (single centralized agent)...")
+                agent = DQNAgent(
+                    state_dim, action_dim, graph=G_real, seed=seed,
+                    batch_size=batch_size, buffer_size=buffer_size
+                )
+                is_multi_agent = False
+            
             st.session_state.agent = agent
+            st.session_state.agent_type = agent_type  # Store for later use
             st.session_state.training_history = []
+            
+            # Display training configuration
+            st.info(f"📊 Training Config: Batch Size={batch_size}, Train Freq={train_freq}x, Buffer={buffer_size}")
             
             progress_bar = st.progress(0)
             status_text = st.empty()
@@ -271,16 +336,28 @@ with tab_train:
                 
                 while not done:
                     current_node = env.current
+                    previous_node = env.previous  # Get previous node to avoid
                     valid_actions = list(G_real.neighbors(current_node))
                     
-                    # AgentManager act
-                    action = agent.act(state, valid_actions, current_node)
+                    # Action selection with loop prevention (different for each architecture)
+                    if is_multi_agent:
+                        action = agent.act(state, valid_actions, current_node, avoid_node=previous_node)
+                    else:
+                        action = agent.act(state, valid_actions, avoid_node=previous_node)
                     
                     next_state, reward, done, info = env.step(action)
                     
-                    # AgentManager remember & train specific agent
-                    agent.remember(state, action, reward, next_state, done, current_node)
-                    agent.replay_train(current_node)
+                    # Store experience (different for each architecture)
+                    if is_multi_agent:
+                        agent.remember(state, action, reward, next_state, done, current_node)
+                        # Train multiple times per step for better learning
+                        for _ in range(train_freq):
+                            agent.replay_train(current_node)
+                    else:
+                        agent.remember(state, action, reward, next_state, done)
+                        # Train multiple times per step for better learning
+                        for _ in range(train_freq):
+                            agent.replay_train()
                     
                     state = next_state
                     ep_reward += reward
@@ -294,24 +371,31 @@ with tab_train:
                     progress_bar.progress(progress)
                     
                     avg_reward = np.mean(total_rewards[-50:])
-                    status_text.text(f"Episode {ep+1}/{episodes} | Avg Reward (last 50): {avg_reward:.2f} | Epsilon: {agent.epsilon:.3f}")
+                    eps_display = f"AvgEps: {agent.epsilon:.3f}" if is_multi_agent else f"Eps: {agent.epsilon:.3f}"
+                    status_text.text(f"Episode {ep+1}/{episodes} | Avg Reward (last 50): {avg_reward:.2f} | {eps_display}")
                     
                     # Live chart
                     fig, ax = plt.subplots(figsize=(6, 2))
                     ax.plot(total_rewards, label='Reward')
                     ax.set_xlabel('Episode')
                     ax.set_ylabel('Total Reward')
+                    ax.set_title(f'Training Progress ({agent_type})')
                     ax.legend()
                     chart_placeholder.pyplot(fig)
                     plt.close(fig)
             
-            st.success("Training Complete!")
+            st.success(f"✅ Training Complete using {agent_architecture}!")
             
             # Save model
             if save_dir:
                 os.makedirs(save_dir, exist_ok=True)
-                agent.save(save_dir) # AgentManager.save takes directory
-                st.info(f"Models saved to {save_dir}")
+                if is_multi_agent:
+                    agent.save(save_dir)  # AgentManager.save takes directory
+                    st.info(f"💾 Multi-agent models saved to {save_dir}/ (one file per router)")
+                else:
+                    model_path = os.path.join(save_dir, 'dqn_routing_tf.keras')
+                    agent.save(model_path)
+                    st.info(f"💾 Universal agent model saved to {model_path}")
 
 with tab_sim:
     st.header("Simulation & Comparison")
@@ -324,6 +408,12 @@ with tab_sim:
             G_real = st.session_state.graph_real
             s = src_node
             d = dst_node
+            
+            # Detect agent type
+            is_multi_agent = hasattr(agent, 'agents')
+            agent_type_display = "Multi-Agent" if is_multi_agent else "Universal"
+            
+            st.info(f"🚀 Running simulation with {agent_type_display} architecture")
             
             # -- RL Agent Run --
             # We need to temporarily silence epsilon for evaluation
@@ -348,7 +438,7 @@ with tab_sim:
                     st.session_state.pos,
                     path=path_agent,
                     path_color="orange",
-                    title=f"Step {step}: At node {current_node}"
+                    title=f"Step {step}: At node {current_node} ({agent_type_display})"
                 )
                 placeholder_map.pyplot(fig_sim)
                 plt.close(fig_sim)
@@ -360,10 +450,21 @@ with tab_sim:
                     break
                 
                 state = env._get_state()
-                # AgentManager act
-                action = agent.act(state, valid_actions, current_node)
+                previous_node = env.previous  # Get previous node to avoid
                 
-                _, reward, done, _ = env.step(action)
+                # Action selection with loop prevention based on agent type
+                if is_multi_agent:
+                    action = agent.act(state, valid_actions, current_node, avoid_node=previous_node)
+                else:
+                    action = agent.act(state, valid_actions, avoid_node=previous_node)
+                
+                _, reward, done, info = env.step(action)
+                
+                # Show loop warnings
+                if 'immediate_loop' in info:
+                    status_sim.warning("⚠️ Immediate backtracking detected!")
+                elif 'revisit' in info:
+                    status_sim.info(f"ℹ️ Revisiting node (visit #{info.get('visit_count', 1)})")
                 
                 # Calculate real cost (weight)
                 edge_weight = G_real[current_node][action]['weight']
@@ -373,9 +474,11 @@ with tab_sim:
                 
                 if done:
                     if env.current == d:
-                        status_sim.success(f"Reached Destination! Total Cost: {cost_agent}")
+                        # Show efficiency metrics
+                        efficiency = info.get('efficiency', 0)
+                        status_sim.success(f"✅ Reached Destination! Cost: {cost_agent:.1f}, Efficiency: {efficiency:.1%}")
                     else:
-                        status_sim.error("Transformation limit reached or failed.")
+                        status_sim.error("❌ Max steps reached or excessive looping detected")
                     break
             
             agent.epsilon = old_eps # Restore epsilon

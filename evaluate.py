@@ -6,9 +6,11 @@ from src.env import NetworkRoutingEnv
 
 
 def extract_route_from_agent(agent, G, src, dst, max_steps=None):
-    # Save original epsilon and set to 0 for deterministic evaluation
+    """Extract route from agent (supports both architectures)."""
     original_epsilon = agent.epsilon
     agent.epsilon = 0.0
+    
+    is_multi_agent = hasattr(agent, 'agents')
     
     env = NetworkRoutingEnv(G, reward_mode='C')
     env.reset(src=src, dst=dst)
@@ -23,8 +25,10 @@ def extract_route_from_agent(agent, G, src, dst, max_steps=None):
             break
         state = env._get_state()
         
-        # Pass current_node to agent manager
-        action = agent.act(state, neighbors, current_node)
+        if is_multi_agent:
+            action = agent.act(state, neighbors, current_node)
+        else:
+            action = agent.act(state, neighbors)
         
         _, reward, done, _ = env.step(action)
         path.append(action)
@@ -33,7 +37,6 @@ def extract_route_from_agent(agent, G, src, dst, max_steps=None):
         if done:
             break
     
-    # Restore original epsilon
     agent.epsilon = original_epsilon
     return path, total_cost
 
@@ -43,11 +46,9 @@ def compare_with_dijkstra(agent, G, trials=50):
     stats = []
     for _ in range(trials):
         src, dst = np.random.choice(nodes, size=2, replace=False)
-        # agent route
         route_agent, cost_agent = extract_route_from_agent(agent, G, src, dst)
         success_agent = route_agent[-1] == dst
 
-        # dijkstra
         try:
             path_dij = nx.shortest_path(G, src, dst, weight='weight')
             cost_dij = sum(G[u][v].get('weight', 1.0) for u, v in zip(path_dij[:-1], path_dij[1:]))
@@ -71,21 +72,17 @@ def plot_route_comparison(G, route_agent, route_dijkstra, title="Route Compariso
     plt.figure(figsize=(12, 6))
     pos = nx.spring_layout(G, seed=42)
     
-    # Plot graph structure
     nx.draw_networkx_nodes(G, pos, node_color='lightblue', node_size=500)
     nx.draw_networkx_edges(G, pos, width=1, alpha=0.5)
     nx.draw_networkx_labels(G, pos)
     
-    # Plot edge weights
     edge_labels = nx.get_edge_attributes(G, 'weight')
     nx.draw_networkx_edge_labels(G, pos, edge_labels)
     
-    # Plot agent's route
     if route_agent:
         path_edges = list(zip(route_agent[:-1], route_agent[1:]))
         nx.draw_networkx_edges(G, pos, edgelist=path_edges, edge_color='r', width=2, label='Agent')
     
-    # Plot Dijkstra's route
     if route_dijkstra:
         path_edges = list(zip(route_dijkstra[:-1], route_dijkstra[1:]))
         nx.draw_networkx_edges(G, pos, edgelist=path_edges, edge_color='g', width=2, alpha=0.5, label='Dijkstra')
@@ -94,13 +91,13 @@ def plot_route_comparison(G, route_agent, route_dijkstra, title="Route Compariso
     plt.legend()
     return plt.gcf()
 
+
 def analyze_stats(stats):
-    """Analyze and print detailed comparison statistics."""
+    """Analyze and print comparison statistics."""
     n_trials = len(stats)
     n_agent_success = sum(s['agent_success'] for s in stats)
     n_dij_success = sum(s['dij_success'] for s in stats)
     
-    # Filter successful cases for both
     successful = [s for s in stats if s['agent_success'] and s['dij_success']]
     
     if successful:
@@ -111,37 +108,33 @@ def analyze_stats(stats):
         print(f"Agent Success Rate: {n_agent_success/n_trials*100:.1f}%")
         print(f"Average Cost Ratio (Agent/Dijkstra): {np.mean(cost_ratios):.2f}")
         print(f"Average Hop Ratio (Agent/Dijkstra): {np.mean(hop_ratios):.2f}")
-        print(f"\nDetailed Stats (successful routes only):")
+        print(f"\nDetailed Stats:")
         print(f"Cost Ratio - Mean: {np.mean(cost_ratios):.2f}, Std: {np.std(cost_ratios):.2f}")
         print(f"Hop Ratio  - Mean: {np.mean(hop_ratios):.2f}, Std: {np.std(hop_ratios):.2f}")
     else:
         print("No successful comparisons available.")
 
+
 if __name__ == '__main__':
-    import matplotlib.pyplot as plt
     from src.agent import AgentManager
     from train_dqn_tf import build_sample_graph
     
-    # Load trained model
     model_dir = 'models_test'
     if not os.path.exists(model_dir):
-        print(f"No trained model directory found at {model_dir}. Please run training first.")
+        print(f"No model found at {model_dir}")
         exit(1)
     
-    # Initialize environment and agent
     G = build_sample_graph()
     state_dim = NetworkRoutingEnv(G)._get_state().shape[0]
     agent = AgentManager(state_dim, G.number_of_nodes(), graph=G)
     agent.load(model_dir)
     
-    # Run evaluation
     print("Running evaluation...")
     stats = compare_with_dijkstra(agent, G, trials=50)
     analyze_stats(stats)
     
-    # Plot a few example routes
     nodes = list(G.nodes())
-    for _ in range(3):  # Plot 3 example routes
+    for _ in range(3):
         src, dst = np.random.choice(nodes, size=2, replace=False)
         route_agent, _ = extract_route_from_agent(agent, G, src, dst)
         try:
@@ -149,10 +142,8 @@ if __name__ == '__main__':
         except nx.NetworkXNoPath:
             route_dijkstra = None
         
-        fig = plot_route_comparison(G, route_agent, route_dijkstra,
-                                  f"Route from {src} to {dst}")
+        fig = plot_route_comparison(G, route_agent, route_dijkstra, f"Route {src} to {dst}")
         fig.savefig(f'models_demo/route_comparison_{src}to{dst}.png')
         plt.close(fig)
     
-    print("\nRoute visualizations saved to models_demo/route_comparison_*.png")
-
+    print("\nVisualizations saved to models_demo/")

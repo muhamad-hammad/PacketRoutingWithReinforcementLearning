@@ -38,7 +38,121 @@ def build_model(input_dim, output_dim, lr=1e-3):
     return model
 
 
+# =====================================================================
+# Universal DQN Agent (Single Agent for All Nodes)
+# =====================================================================
+class DQNAgent:
+    """
+    Universal DQN Agent - Single model handles routing for all nodes.
+    This is the simpler, centralized approach.
+    """
+    def __init__(self, state_dim, action_dim, graph=None, lr=1e-3, gamma=0.95, epsilon=1.0,
+                 epsilon_min=0.05, epsilon_decay=0.995, buffer_size=10000,
+                 batch_size=32, target_update_freq=500, seed=None):
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.graph = graph
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.epsilon_min = epsilon_min
+        self.epsilon_decay = epsilon_decay
+        self.batch_size = batch_size
+        self.target_update_freq = target_update_freq
+        self.train_steps = 0
 
+        if seed is not None:
+            random.seed(seed)
+            np.random.seed(seed)
+            tf.random.set_seed(seed)
+
+        self.model = build_model(state_dim, action_dim, lr=lr)
+        self.target = build_model(state_dim, action_dim, lr=lr)
+        self.update_target()
+
+        self.replay = ReplayBuffer(capacity=buffer_size)
+
+    def update_target(self):
+        self.target.set_weights(self.model.get_weights())
+
+    def act(self, state, valid_actions, avoid_node=None):
+        """
+        Select action using epsilon-greedy policy with loop prevention.
+        
+        Args:
+            state: Current state
+            valid_actions: List of valid neighbor nodes
+            avoid_node: Optional node to avoid (e.g., previous node)
+        """
+        # Filter out the node to avoid if specified
+        if avoid_node is not None and len(valid_actions) > 1:
+            filtered_actions = [a for a in valid_actions if a != avoid_node]
+            if filtered_actions:
+                valid_actions = filtered_actions
+        
+        if np.random.rand() < self.epsilon:
+            return random.choice(valid_actions)
+        
+        q = self.model.predict(state.reshape(1, -1), verbose=0)[0]
+        return max(valid_actions, key=lambda a: q[a])
+
+    def remember(self, s, a, r, ns, d):
+        """Store experience in replay buffer."""
+        self.replay.push(s, a, r, ns, d)
+
+    def replay_train(self):
+        """Train the model using experience replay."""
+        if len(self.replay) < self.batch_size:
+            return 0
+
+        states, actions, rewards, next_states, dones = self.replay.sample(self.batch_size)
+        targets = self.model.predict(states, verbose=0)
+        next_qs = self.target.predict(next_states, verbose=0)
+
+        for i in range(len(states)):
+            a = int(actions[i])
+            if dones[i]:
+                targets[i][a] = rewards[i]
+            else:
+                if self.graph is None:
+                    next_max = np.max(next_qs[i])
+                else:
+                    # Infer next current node from state
+                    num_nodes = self.graph.number_of_nodes()
+                    next_state = next_states[i]
+                    next_cur = int(np.argmax(next_state[:num_nodes]))
+                    neighbors = list(self.graph.neighbors(next_cur))
+                    if len(neighbors) == 0:
+                        next_max = np.max(next_qs[i])
+                    else:
+                        next_max = np.max(next_qs[i][neighbors])
+
+                targets[i][a] = rewards[i] + self.gamma * next_max
+
+        self.model.fit(states, targets, epochs=1, verbose=0)
+
+        # Epsilon decay
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+
+        self.train_steps += 1
+        if self.train_steps % self.target_update_freq == 0:
+            self.update_target()
+
+        return 1
+
+    def save(self, path):
+        """Save the model to a file."""
+        self.model.save(path)
+
+    def load(self, path):
+        """Load the model from a file."""
+        self.model = tf.keras.models.load_model(path)
+        self.update_target()
+
+
+# =====================================================================
+# Multi-Agent Architecture (One Agent Per Node)
+# =====================================================================
 class NodeAgent:
     def __init__(self, state_dim, action_dim, node_id, graph=None, lr=1e-3, gamma=0.95, epsilon=1.0,
                  epsilon_min=0.05, epsilon_decay=0.995, buffer_size=10000,
@@ -72,10 +186,24 @@ class NodeAgent:
     def update_target(self):
         self.target.set_weights(self.model.get_weights())
 
-    def act(self, state, valid_actions):
-        # valid_actions: list of neighbor node indices
+    def act(self, state, valid_actions, avoid_node=None):
+        """
+        Select action using epsilon-greedy policy with loop prevention.
+        
+        Args:
+            state: Current state
+            valid_actions: List of valid neighbor nodes
+            avoid_node: Optional node to avoid (e.g., previous node)
+        """
+        # Filter out the node to avoid if specified
+        if avoid_node is not None and len(valid_actions) > 1:
+            filtered_actions = [a for a in valid_actions if a != avoid_node]
+            if filtered_actions:
+                valid_actions = filtered_actions
+        
         if np.random.rand() < self.epsilon:
             return random.choice(valid_actions)
+        
         q = self.model.predict(state.reshape(1, -1), verbose=0)[0]
         # pick valid action with max q
         return max(valid_actions, key=lambda a: q[a])
@@ -167,8 +295,8 @@ class AgentManager:
                 state_dim, action_dim, node_id=node, graph=graph, seed=seed, **kwargs
             )
 
-    def act(self, state, valid_actions, current_node):
-        return self.agents[current_node].act(state, valid_actions)
+    def act(self, state, valid_actions, current_node, avoid_node=None):
+        return self.agents[current_node].act(state, valid_actions, avoid_node=avoid_node)
 
     def remember(self, s, a, r, ns, d, current_node):
         self.agents[current_node].remember(s, a, r, ns, d)
